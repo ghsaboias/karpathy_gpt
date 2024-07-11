@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import time
 
 # hyperparameters
 batch_size = 32
@@ -11,6 +12,7 @@ learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 32
+n_layer = 4
 # --------------
 
 torch.manual_seed(1337)
@@ -107,21 +109,43 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
         
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
     
 class FeedForward(nn.Module):
     """ a simple linear layer followed by a non-linearity """
     def __init__(self, n_embd):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embd, n_embd),
+            nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd), # projection layer
         )
         
     def forward(self, x):
+        # for each token, independently
         return self.net(x)
+    
+class Block(nn.Module):
+    """ Transformer block: communication followed by computation """
+    def __init__(self, n_embd, n_head):
+        # n_embd: embedding dim; n_head: number of heads
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+        
+    def forward(self, x):
+        # for each token, independently
+        x = x + self.sa(self.ln1(x))   # residual connections
+        x = x + self.ffwd(self.ln2(x)) # residual connections
+        return x
         
 class BigramLanguageModel(nn.Module):
 
@@ -130,8 +154,14 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd) # positional embeddings
-        self.sa_heads = MultiHeadAttention(4, n_embd//4) # 4 heads of 8-dim self-attention
-        self.ffwd = FeedForward(n_embd)
+        # self.sa_heads = MultiHeadAttention(4, n_embd//4) # 4 heads of 8-dim self-attention
+        # self.ffwd = FeedForward(n_embd)
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            nn.LayerNorm(n_embd), # final layer norm, before output
+        )
         self.lm_head = nn.Linear(n_embd, vocab_size) # language modeling head
 
     def forward(self, idx, targets=None):
@@ -140,8 +170,9 @@ class BigramLanguageModel(nn.Module):
         tok_embd = self.token_embedding_table(idx) # (B, T, C): batch, time, channel
         pos_embd = self.position_embedding_table(torch.arange(T, device=device)) # (T, C)
         x = tok_embd + pos_embd # (B, T, C); right-aligned, add dimension of 1 to the left, broadcast through batch dim
-        x = self.sa_heads(x) # apply one head of self-attention; [B, T, C]
-        x = self.ffwd(x) # apply feed-forward layer; [B, T, C]
+        # x = self.sa_heads(x) # apply one head of self-attention; [B, T, C]
+        # x = self.ffwd(x) # apply feed-forward layer; [B, T, C]
+        x = self.blocks(x)
         logits = self.lm_head(x) # (B, T, V): batch, time, vocab_size
 
         if targets is None:
@@ -179,7 +210,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
 # training loop
 for iter in range(max_iters):
-
+    start_time = time.time()
     if iter % eval_interval == 0:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['eval']:.4f}")
@@ -191,13 +222,10 @@ for iter in range(max_iters):
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
+    
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Iteration {iter} completed in {elapsed_time:.2f} seconds")
 
 context = torch.zeros((1, 1), dtype=torch.long)
 print(decode(model.generate(idx, max_new_tokens=200)[0].tolist()))
-
-
-
-
-
-
-
