@@ -121,7 +121,6 @@ class FeedForward(nn.Module):
         )
         
     def forward(self, x):
-        # per token
         return self.net(x)
         
 class BigramLanguageModel(nn.Module):
